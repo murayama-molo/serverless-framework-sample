@@ -1,0 +1,86 @@
+service: serverless-framework-sample-waf
+frameworkVersion: "3"
+
+custom:
+  defaultStage: stg
+  Stage:
+  s3Sync:
+    - bucketName: ${sls:stage}-sample-hosting
+      localDir: ./dist
+      acl: private
+  IPSet:
+    Addresses:
+      dev:
+        - 192.0.2.44/32 # sample
+      stg:
+        - 192.0.2.44/32 # sample
+      prd:
+        - 192.0.2.44/32 # sample
+  OriginPath:
+    dev: "/dev"
+    stg: "/stg"
+    prd: "/"
+
+  CallbackURLs:
+    dev:
+      - http://localhost:3000
+    stg:
+      - http://localhost:3000
+      - https://stg.serverless-framework-sample.co.jp
+    prd:
+      - https://serverless-framework-sample.co.jp
+  LogoutURLs:
+    dev:
+      - https://stg-sample.auth.ap-northeast-1.amazoncognito.com/login?client_id=xxxxxxxxxxxxxxxxxxxxxxxxxx&response_type=code&scope=openid&redirect_uri=http://localhost:3000
+    stg:
+      - https://stg-sample.auth.ap-northeast-1.amazoncognito.com/login?client_id=xxxxxxxxxxxxxxxxxxxxxxxxxx&response_type=code&scope=openid&redirect_uri=http://localhost:3000
+      - https://stg-sample.auth.ap-northeast-1.amazoncognito.com/login?client_id=xxxxxxxxxxxxxxxxxxxxxxxxxx&response_type=code&scope=openid&redirect_uri=https://stg.serverless-framework-sample.co.jp
+    prd:
+      - https://serverless-framework-sample.co.jp
+
+provider:
+  name: aws
+  runtime: python3.9
+  lambdaHashingVersion: 20201221
+  stage: ${opt:stage, self:custom.defaultStage}
+  region: us-east-1
+  tags:
+    env: ${sls:stage}
+  logRetentionInDays: 365
+
+resources:
+  Resources:
+    IPSet:
+      Type: AWS::WAFv2::IPSet
+      Properties:
+        Addresses: ${self:custom.IPSet.Addresses.${sls:stage}}
+        Description: IPV4 set for Api Access.
+        IPAddressVersion: IPV4
+        Name: ${sls:stage}-IPSet
+        Scope: CLOUDFRONT
+    WebACL:
+      DependsOn: IPSet
+      Type: AWS::WAFv2::WebACL
+      Properties:
+        DefaultAction:
+          BLOCK: {}
+        Description: WebACL for Api Access.
+        Name: ${sls:stage}-WebACL
+        Rules:
+          - Action:
+              ALLOW: {}
+            Priority: 0
+            Name: ${sls:stage}-APIAccessRule
+            VisibilityConfig:
+              SampledRequestsEnabled: true
+              CloudWatchMetricsEnabled: true
+              MetricName: ${sls:stage}-RuleMetric
+            Statement:
+              IPSetReferenceStatement:
+                Arn:
+                  "Fn::GetAtt": [IPSet, Arn]
+        Scope: CLOUDFRONT # us-east-1でないと動かない。実際には別serverless.ymlに分て定義する必要がある。arnをパラメータで連携する
+        VisibilityConfig:
+          SampledRequestsEnabled: true
+          CloudWatchMetricsEnabled: true
+          MetricName: ${sls:stage}-RuleMetric

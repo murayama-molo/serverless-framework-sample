@@ -1,0 +1,390 @@
+service: serverless-framework-sample
+frameworkVersion: "3"
+
+custom:
+  defaultStage: stg
+  Stage:
+  s3Sync:
+    - bucketName: ${sls:stage}-sample-hosting
+      localDir: ../../dist
+      acl: private
+  IPSet:
+    Addresses:
+      dev:
+        - 192.0.2.44/32 # sample
+      stg:
+        - 192.0.2.44/32 # sample
+      prd:
+        - 192.0.2.44/32 # sample
+  OriginPath:
+    dev: "/dev"
+    stg: "/stg"
+    prd: "/"
+  CallbackURLs:
+    dev:
+      - http://localhost:3000
+    stg:
+      - http://localhost:3000
+      - https://stg.serverless-framework-sample.co.jp
+    prd:
+      - https://serverless-framework-sample.co.jp
+  LogoutURLs:
+    dev:
+      - https://stg-sample.auth.ap-northeast-1.amazoncognito.com/login?client_id=xxxxxxxxxxxxxxxxxxxxxxxxxx&response_type=code&scope=openid&redirect_uri=http://localhost:3000
+    stg:
+      - https://stg-sample.auth.ap-northeast-1.amazoncognito.com/login?client_id=xxxxxxxxxxxxxxxxxxxxxxxxxx&response_type=code&scope=openid&redirect_uri=http://localhost:3000
+      - https://stg-sample.auth.ap-northeast-1.amazoncognito.com/login?client_id=xxxxxxxxxxxxxxxxxxxxxxxxxx&response_type=code&scope=openid&redirect_uri=https://stg.serverless-framework-sample.co.jp
+    prd:
+      - https://serverless-framework-sample.co.jp
+  WebACLId:
+    stg: "" # 作ったWebACLのWebACLIdを設定する
+
+provider:
+  name: aws
+  runtime: python3.9
+  lambdaHashingVersion: 20201221
+  stage: ${opt:stage, self:custom.defaultStage}
+  region: ap-northeast-1
+  # region: us-east-1
+  tags:
+    env: ${sls:stage}
+  logRetentionInDays: 365
+
+resources:
+  Resources:
+    SampleHostingS3Bucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${sls:stage}-sample-hosting
+    SampleCognitoUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        AdminCreateUserConfig:
+          AllowAdminCreateUserOnly: true
+        MfaConfiguration: "OFF"
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 8
+            RequireLowercase: true
+            RequireNumbers: true
+            RequireSymbols: true
+            RequireUppercase: true
+        UserPoolName: ${sls:stage}-sample
+        AliasAttributes:
+          - preferred_username
+        # UsernameAttributes:
+        #   - email
+        Schema:
+          - Name: name
+            AttributeDataType: String
+            Mutable: true
+            Required: true
+    SampleCognitoUserPoolClient:
+      DependsOn: SampleCognitoUserPool
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: ${sls:stage}-sample-client
+        ExplicitAuthFlows:
+          - ALLOW_ADMIN_USER_PASSWORD_AUTH
+          - ALLOW_USER_PASSWORD_AUTH
+          - ALLOW_USER_SRP_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+        GenerateSecret: false
+        # 各トークンの時間制限
+        AccessTokenValidity: 60
+        IdTokenValidity: 60
+        RefreshTokenValidity: 1
+        # 各トークンの有効時間を表す単位
+        TokenValidityUnits:
+          AccessToken: minutes
+          IdToken: minutes
+          RefreshToken: days
+        UserPoolId:
+          Ref: SampleCognitoUserPool
+        AllowedOAuthFlows:
+          - code
+          - implicit
+        AllowedOAuthFlowsUserPoolClient: true
+        AllowedOAuthScopes:
+          # - email
+          - openid
+        CallbackURLs: ${self:custom.CallbackURLs.${sls:stage}}
+        LogoutURLs: ${self:custom.LogoutURLs.${sls:stage}}
+        SupportedIdentityProviders:
+          - COGNITO
+    SampleCognitoUserPoolClientDomain:
+      DependsOn: SampleCognitoUserPoolClient
+      Type: AWS::Cognito::UserPoolDomain
+      Properties:
+        Domain: ${sls:stage}-sample
+        UserPoolId:
+          Ref: SampleCognitoUserPool
+    SampleCognitoUserIdentityPool:
+      DependsOn: SampleCognitoUserPoolClient
+      Type: AWS::Cognito::IdentityPool
+      Properties:
+        IdentityPoolName: ${sls:stage}-identity-pool
+        AllowUnauthenticatedIdentities: true
+        CognitoIdentityProviders:
+          - ClientId:
+              Ref: SampleCognitoUserPoolClient
+            ProviderName:
+              Fn::GetAtt: ["SampleCognitoUserPool", "ProviderName"]
+    SampleCognitoSampleAuthRole:
+      DependsOn: SampleCognitoUserIdentityPool
+      Type: AWS::IAM::Role
+      Properties:
+        Path: /
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal:
+                Federated: "cognito-identity.amazonaws.com"
+              Action:
+                - "sts:AssumeRoleWithWebIdentity"
+              Condition:
+                StringEquals:
+                  "cognito-identity.amazonaws.com:aud":
+                    Ref: SampleCognitoUserIdentityPool
+                "ForAnyValue:StringLike":
+                  "cognito-identity.amazonaws.com:amr": authenticated
+        Policies:
+          - PolicyName: ${sls:stage}--SampleCognitoAuthorizedPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "mobileanalytics:PutEvents"
+                    - "cognito-sync:*"
+                    - "cognito-identity:*"
+                  Resource: "*"
+    SampleCognitoUnauthenticatedRole:
+      DependsOn: SampleCognitoUserIdentityPool
+      Type: AWS::IAM::Role
+      Properties:
+        Path: /
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal:
+                Federated: "cognito-identity.amazonaws.com"
+              Action:
+                - "sts:AssumeRoleWithWebIdentity"
+              Condition:
+                StringEquals:
+                  "cognito-identity.amazonaws.com:aud":
+                    Ref: SampleCognitoUserIdentityPool
+                "ForAnyValue:StringLike":
+                  "cognito-identity.amazonaws.com:amr": unauthenticated
+        Policies:
+          - PolicyName: ${sls:stage}-general-SampleCognitoAuthorizedPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - mobileanalytics:PutEvents
+                    - cognito-sync:*
+                  Resource:
+                    - "*"
+    SampleCognitoGeneralAuthRole:
+      DependsOn: SampleCognitoUserIdentityPool
+      Type: AWS::IAM::Role
+      Properties:
+        Path: /
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal:
+                Federated: "cognito-identity.amazonaws.com"
+              Action:
+                - "sts:AssumeRoleWithWebIdentity"
+              Condition:
+                StringEquals:
+                  "cognito-identity.amazonaws.com:aud":
+                    Ref: SampleCognitoUserIdentityPool
+                "ForAnyValue:StringLike":
+                  "cognito-identity.amazonaws.com:amr": authenticated
+        Policies:
+          - PolicyName: ${sls:stage}-general-SampleCognitoAuthorizedPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - cognito-identity:GetCredentialsForIdentity
+                    - cognito-identity:GetId
+                  Resource: "*"
+    SampleCognitoUserIdentityPoolRoleAttachment:
+      DependsOn: SampleCognitoSampleAuthRole
+      Type: AWS::Cognito::IdentityPoolRoleAttachment
+      Properties:
+        IdentityPoolId:
+          Ref: SampleCognitoUserIdentityPool
+        Roles:
+          unauthenticated:
+            Fn::GetAtt: [SampleCognitoUnauthenticatedRole, Arn]
+          authenticated:
+            Fn::GetAtt: [SampleCognitoGeneralAuthRole, Arn]
+        RoleMappings:
+          roleMapping:
+            AmbiguousRoleResolution: AuthenticatedRole
+            IdentityProvider: !Sub cognito-idp.${self:provider.region}.amazonaws.com/${SampleCognitoUserPool}:${SampleCognitoUserPoolClient}
+            # ユーザーをロールにマッピングするために使用されるルール
+            RulesConfiguration:
+              Rules:
+                - Claim: isSample
+                  MatchType: Equals
+                  RoleARN:
+                    Fn::GetAtt: [SampleCognitoSampleAuthRole, Arn]
+                  Value: yes
+            Type: Token
+    SampleUserPoolGroup:
+      Type: AWS::Cognito::UserPoolGroup
+      Properties:
+        GroupName: Sample
+        Precedence: 1
+        RoleArn:
+          Fn::GetAtt: [SampleCognitoSampleAuthRole, Arn]
+        UserPoolId:
+          Ref: SampleCognitoUserPool
+    SampleHostingCloudFrontOriginAccessIdentity:
+      DependsOn: SampleHostingS3Bucket
+      Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+      Properties:
+        CloudFrontOriginAccessIdentityConfig:
+          Comment:
+            Ref: AWS::StackName
+    SampleHostingS3Policy:
+      DependsOn: SampleHostingCloudFrontOriginAccessIdentity
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket:
+          Ref: SampleHostingS3Bucket
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                AWS:
+                  Fn::Join:
+                    - " "
+                    - - "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity"
+                      - Ref: SampleHostingCloudFrontOriginAccessIdentity
+              Action: s3:GetObject
+              Resource:
+                Fn::Join:
+                  - "/"
+                  - - Fn::GetAtt:
+                        - SampleHostingS3Bucket
+                        - Arn
+                    - "*"
+    SampleHostingCloudFront:
+      DependsOn: SampleHostingS3Policy
+      Type: AWS::CloudFront::Distribution
+      Properties:
+        DistributionConfig:
+          Enabled: true
+          Comment: ${sls:stage}環境 Sample Hosting用
+          PriceClass: PriceClass_All
+          DefaultRootObject: index.html
+          HttpVersion: http2
+          Origins:
+            - Id: S3Origin
+              DomainName: ${sls:stage}-sample-hosting.s3.${self:provider.region}.amazonaws.com
+              S3OriginConfig:
+                OriginAccessIdentity:
+                  Fn::Join:
+                    - "/"
+                    - - origin-access-identity/cloudfront
+                      - Ref: SampleHostingCloudFrontOriginAccessIdentity
+            - Id: APIGateway
+              DomainName:
+                Fn::Join:
+                  - "."
+                  - - Ref: ApiGatewayRestApi
+                    - execute-api.${self:provider.region}.amazonaws.com
+              OriginPath: ${self:custom.OriginPath.${sls:stage}}
+              CustomOriginConfig:
+                HTTPPort: 80
+                HTTPSPort: 443
+                OriginProtocolPolicy: "http-only"
+                OriginSSLProtocols:
+                  - "TLSv1.2"
+          DefaultCacheBehavior:
+            AllowedMethods:
+              - HEAD
+              - GET
+            CachedMethods:
+              - HEAD
+              - GET
+            Compress: true
+            DefaultTTL: 30
+            MaxTTL: 120
+            MinTTL: 30
+            ForwardedValues:
+              QueryString: true
+            SmoothStreaming: false
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: https-only
+          CacheBehaviors:
+            - PathPattern: "/api/*"
+              AllowedMethods:
+                - HEAD
+                - GET
+                - OPTIONS
+                - PUT
+                - POST
+                - PATCH
+                - DELETE
+              Compress: true
+              DefaultTTL: 30
+              MaxTTL: 120
+              MinTTL: 30
+              ForwardedValues:
+                QueryString: true
+              SmoothStreaming: false
+              TargetOriginId: APIGateway
+              ViewerProtocolPolicy: https-only
+          WebACLId: arn:aws:wafv2:us-east-1:${aws:accountId}:global/webacl/${sls:stage}-WebACL/${self:custom.WebACLId.${sls:stage}}
+
+  Outputs:
+    SampleCognitoUserPool:
+      Value:
+        Ref: SampleCognitoUserPool
+      Export:
+        Name: ${sls:stage}-${self:service}-SampleCognitoUserPool
+    ApiGatewayRestApi:
+      Value:
+        Ref: ApiGatewayRestApi
+      Export:
+        Name: ${self:service}-restApiId-${self:provider.stage}
+
+package:
+  include:
+    - api/**
+  exclude:
+    - node_modules/**
+    - dist/**
+    - .serverless
+    - .gitignore
+    - .git/**
+
+plugins:
+  - serverless-s3-sync
+
+functions:
+  hello:
+    handler: ../../api/hello/handler.hello
+    name: hello
+    description: テストAPI
+    timeout: 15
+    memorySize: 128
+    events:
+      - http:
+          path: "api/hello"
+          method: get
+          integration: lambda
