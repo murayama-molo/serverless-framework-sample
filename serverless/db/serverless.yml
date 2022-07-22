@@ -1,0 +1,229 @@
+service: serverless-framework-sample-db
+frameworkVersion: "3"
+
+custom:
+  defaultStage: stg
+  Stage:
+  db_id: ${self:service}-${sls:stage}
+  # environments: ${file(./config/config.${opt:stage, self:custom.defaultStage}.yml)}
+  secret: ${file(./config/secret/.secret.${sls:stage}.yml)}
+
+provider:
+  name: aws
+  runtime: python3.9
+  lambdaHashingVersion: 20201221
+  stage: ${opt:stage, self:custom.defaultStage}
+  region: ap-northeast-1
+  tags:
+    env: ${sls:stage}
+  logRetentionInDays: 365
+  versionFunctions: false
+  # iamRoleStatements:
+  #   - Effect: Allow
+  #     Action:
+  #       - secretsmanager:GetSecretValue
+  #       - rds-data:*
+  #       - ec2:CreateNetworkInterface
+  #       - ec2:DescribeNetworkInterfaces
+  #       - ec2:DeleteNetworkInterface
+  #     Resource: "*"
+  # environment:
+  #   # ENV: ${self:custom.environments.ENV}
+  #   DB_PORT: 3306
+  #   DB_HOST:
+  #     GetAtt:
+  #       - RDSProxy
+  #       - Endpoint
+
+resources:
+  Resources:
+    ## VPC Resource
+    VPC:
+      Type: AWS::EC2::VPC
+      Properties:
+        CidrBlock: 10.0.0.0/24
+        Tags:
+          - { Key: Name, Value: Sample VPC }
+    PrivateSubnetA:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId:
+          Ref: VPC
+        CidrBlock: 10.0.0.0/25
+        AvailabilityZone: ap-northeast-1a
+        Tags:
+          - { Key: Name, Value: Sample Private A }
+      DependsOn: VPC
+    PrivateSubnetC:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId:
+          Ref: VPC
+        CidrBlock: 10.0.0.128/25
+        AvailabilityZone: ap-northeast-1c
+        Tags:
+          - { Key: Name, Value: Sample Private C }
+      DependsOn: VPC
+    LambdaSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: SecurityGroup for Lambda Functions
+        VpcId:
+          Ref: VPC
+        Tags:
+          - Key: "Name"
+            Value: "LambdaSecurityGroup"
+      DependsOn: VPC
+    AuroraSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: SecurityGroup for Aurora
+        VpcId:
+          Ref: VPC
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 5432
+            ToPort: 5432
+            CidrIp: 10.0.0.0/24
+        Tags:
+          - Key: "Name"
+            Value: "AuroraSecurityGroup"
+      DependsOn: VPC
+
+    ## RDS Resource
+    DBSubnetGroup:
+      Type: AWS::RDS::DBSubnetGroup
+      Properties:
+        DBSubnetGroupDescription: "SampleDB subnet group"
+        DBSubnetGroupName: sampledb-subnet-group
+        SubnetIds:
+          - Ref: PrivateSubnetA
+          - Ref: PrivateSubnetC
+      DependsOn:
+        - PrivateSubnetA
+        - PrivateSubnetC
+    DBClusterParameterGroup:
+      Type: AWS::RDS::DBClusterParameterGroup
+      Properties:
+        Description: A parameter group for aurora
+        Family: aurora-postgresql10
+        Parameters:
+          client_encoding: UTF8
+    AuroraSecret:
+      Type: AWS::SecretsManager::Secret
+      Properties:
+        Name: Sample/aurora
+        SecretString: '{"username":"${self:custom.secret.USER_NAME}", "password":"${self:custom.secret.PASSWORD}"}'
+    DBCluster:
+      Type: AWS::RDS::DBCluster
+      Properties:
+        DatabaseName: SampleDB
+        BackupRetentionPeriod: 7
+        Engine: aurora-postgresql
+        EngineMode: serverless
+        EngineVersion: "10.18"
+        MasterUsername: ${self:custom.secret.USER_NAME}
+        MasterUserPassword: ${self:custom.secret.PASSWORD}
+        Port: 5432
+        PreferredBackupWindow: 15:25-15:55
+        PreferredMaintenanceWindow: Tue:16:05-Tue:16:35
+        ScalingConfiguration:
+          MinCapacity: 2
+          AutoPause: true
+          MaxCapacity: 4
+          SecondsUntilAutoPause: 1800
+        StorageEncrypted: true
+        DBClusterParameterGroupName:
+          Ref: DBClusterParameterGroup
+        DBSubnetGroupName:
+          Ref: DBSubnetGroup
+        VpcSecurityGroupIds:
+          - Ref: AuroraSecurityGroup
+      DependsOn:
+        - DBClusterParameterGroup
+        - DBSubnetGroup
+        - DBClusterParameterGroup
+        - AuroraSecurityGroup
+    SecretTargetAttachment:
+      Type: AWS::SecretsManager::SecretTargetAttachment
+      Properties:
+        SecretId:
+          Ref: AuroraSecret
+        TargetId:
+          Ref: DBCluster
+        TargetType: "AWS::RDS::DBCluster"
+      DependsOn:
+        - DBCluster
+        - AuroraSecret
+    # ProxyRole:
+    #   Type: AWS::IAM::Role
+    #   Properties:
+    #     RoleName: sample-proxy-role
+    #     AssumeRolePolicyDocument:
+    #       Version: "2012-10-17"
+    #       Statement:
+    #         - Effect: Allow
+    #           Principal:
+    #             Service:
+    #               - "rds.amazonaws.com"
+    #           Action:
+    #             - "sts:AssumeRole"
+    #     Path: /
+    #     Policies:
+    #       - PolicyName: RdsProxyPolicy
+    #         PolicyDocument:
+    #           Version: "2012-10-17"
+    #           Statement:
+    #             - Effect: Allow
+    #               Action:
+    #                 - "secretsmanager:GetResourcePolicy"
+    #                 - "secretsmanager:GetSecretValue"
+    #                 - "secretsmanager:DescribeSecret"
+    #                 - "secretsmanager:ListSecretVersionIds"
+    #               Resource:
+    #                 - Ref: AuroraSecret
+    #             - Effect: Allow
+    #               Action:
+    #                 - "kms:Decrypt"
+    #               Resource: "arn:aws:kms:${self:provider.region}:#{AWS::AccountId}:key/*"
+    #               Condition:
+    #                 StringEquals:
+    #                   kms:ViaService: "secretsmanager.${self:provider.region}.amazonaws.com"
+    #   DependsOn: AuroraSecret
+    # RDSProxy:
+    #   Type: AWS::RDS::DBProxy
+    #   Properties:
+    #     DBProxyName: SampleAuroraProxy
+    #     Auth:
+    #       - SecretArn:
+    #           Ref: AuroraSecret
+    #     VpcSecurityGroupIds:
+    #       - Ref: AuroraSecurityGroup
+    #     VpcSubnetIds:
+    #       - Ref: PrivateSubnetA
+    #       - Ref: PrivateSubnetC
+    #     EngineFamily: POSTGRESQL
+    #     RoleArn:
+    #       Fn::GetAtt:
+    #         - ProxyRole
+    #         - Arn
+    #   DependsOn: AuroraSecret
+    # DBProxyTargetGroup:
+    #   Type: AWS::RDS::DBProxyTargetGroup
+    #   Properties:
+    #     TargetGroupName: default
+    #     DBProxyName:
+    #       Ref: RDSProxy
+    #     DBClusterIdentifiers:
+    #       - Ref: DBCluster
+    #   DependsOn: RDSProxy
+
+package:
+  include:
+    - api/**
+  exclude:
+    - node_modules/**
+    - dist/**
+    - .serverless
+    - .gitignore
+    - .git/**

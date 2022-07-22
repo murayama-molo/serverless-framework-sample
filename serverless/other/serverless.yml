@@ -377,14 +377,25 @@ plugins:
   - serverless-s3-sync
 
 functions:
-  hello:
-    handler: ../../api/hello/handler.hello
+  getHello:
+    handler: handler.getHello
     name: hello
-    description: テストAPI
+    description: GET テストAPI
     timeout: 15
     memorySize: 128
     events:
       - http:
           path: "api/hello"
           method: get
+          integration: lambda
+  postHello:
+    handler: handler.postHello
+    name: hello
+    description: POST テストAPI
+    timeout: 15
+    memorySize: 128
+    events:
+      - http:
+          path: "api/hello"
+          method: post
           integration: lambda
